@@ -1,0 +1,60 @@
+rules_version='2'
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Users collection rules
+    match /users/{userId} {
+      // Users can read and write their own document
+      allow read, write: if request.auth != null && request.auth.uid == userId;
+      // Allow reading other users' basic info for collaboration features
+      allow read: if request.auth != null;
+    }
+    
+    // Projects collection rules
+    match /projects/{projectId} {
+      // Allow reading if user is owner or collaborator
+      allow read: if request.auth != null && 
+        (resource.data.owner_id == request.auth.uid || 
+         request.auth.uid in resource.data.collaborators);
+      
+      // Allow writing if user is owner
+      allow write: if request.auth != null && 
+        resource.data.owner_id == request.auth.uid;
+      
+      // Allow creating new projects
+      allow create: if request.auth != null && 
+        request.auth.uid == request.resource.data.owner_id;
+      
+      // Files subcollection
+      match /files/{fileId} {
+        // Allow read/write if user has access to parent project
+        allow read, write: if request.auth != null && 
+          (get(/databases/$(database)/documents/projects/$(projectId)).data.owner_id == request.auth.uid ||
+           request.auth.uid in get(/databases/$(database)/documents/projects/$(projectId)).data.collaborators);
+      }
+      
+      // Messages subcollection
+      match /messages/{messageId} {
+        // Allow read/write if user has access to parent project
+        allow read, write: if request.auth != null && 
+          (get(/databases/$(database)/documents/projects/$(projectId)).data.owner_id == request.auth.uid ||
+           request.auth.uid in get(/databases/$(database)/documents/projects/$(projectId)).data.collaborators);
+      }
+      
+      // Presence subcollection
+      match /presence/{userId} {
+        // Users can only write their own presence
+        allow write: if request.auth != null && request.auth.uid == userId;
+        // Allow reading presence if user has access to parent project
+        allow read: if request.auth != null && 
+          (get(/databases/$(database)/documents/projects/$(projectId)).data.owner_id == request.auth.uid ||
+           request.auth.uid in get(/databases/$(database)/documents/projects/$(projectId)).data.collaborators);
+      }
+    }
+    
+    // Test collection for connectivity tests (temporary)
+    match /test/{document} {
+      allow read, write: if request.time < timestamp.date(2025, 10, 20);
+    }
+  }
+}
