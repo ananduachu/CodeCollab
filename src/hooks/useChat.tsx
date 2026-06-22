@@ -74,6 +74,14 @@ export function useChat(projectId: string) {
     if (!projectId || !session) return;
 
     try {
+      // Check message size (Firestore limit: 1MB per document)
+      const messageSize = new Blob([content]).size;
+      const maxSize = 1024 * 1024; // 1MB
+      
+      if (messageSize > maxSize) {
+        throw new Error(`Message too large (${(messageSize / 1024).toFixed(0)}KB). Maximum size is ${(maxSize / 1024).toFixed(0)}KB.`);
+      }
+
       const data = await apiCall(`/projects/${projectId}/messages`, {
         method: 'POST',
         body: JSON.stringify({ content, type }),
@@ -83,7 +91,13 @@ export function useChat(projectId: string) {
       return data.message;
     } catch (error) {
       console.error('Failed to send message:', error);
-      throw error;
+      
+      // Re-throw with better error message
+      if (error instanceof Error) {
+        throw error;
+      } else {
+        throw new Error('Failed to send message. Please try again.');
+      }
     }
   };
 
@@ -93,10 +107,10 @@ export function useChat(projectId: string) {
 
     fetchMessages();
 
-    // Poll for new messages every 3 seconds
+    // OPTIMIZED: Poll for new messages every 10 seconds (reduced from 3s)
     const messagePolling = setInterval(() => {
       fetchMessages();
-    }, 3000);
+    }, 10000);
 
     return () => {
       clearInterval(messagePolling);

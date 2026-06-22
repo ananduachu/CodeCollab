@@ -5,6 +5,7 @@ const admin = require('firebase-admin');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
+const { executeWithFallback, isQuotaExceeded } = require('./dbFallback');
 
 // Load environment variables
 require('dotenv').config();
@@ -88,20 +89,32 @@ let mockDatabase = {
   invitations: {} // Store pending invitations by email
 };
 
-// Flag to check if Firestore is available
-let firestoreAvailable = false;
+// OPTIMIZATION: Cache for project existence checks (5 minute TTL)
+const projectCache = new Map();
+const PROJECT_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+
+// Flag to check if Firestore is available (global so dbFallback can access it)
+global.firestoreAvailable = false;
 
 // Function to initialize Firestore
 const initializeFirestore = async () => {
   try {
     await db.collection('test').doc('startup-test').get();
-    firestoreAvailable = true;
+    global.firestoreAvailable = true;
     console.log('✅ Firestore is available');
     return true;
   } catch (error) {
-    firestoreAvailable = false;
-    console.log('⚠️  Firestore not available, using in-memory storage for development');
-    console.log('   Error:', error.message);
+    global.firestoreAvailable = false;
+    
+    // Check if it's a quota exceeded error
+    if (isQuotaExceeded(error)) {
+      console.log('⚠️  Firestore quota exceeded at startup, using in-memory storage for development');
+      console.log('   The application will automatically fall back to in-memory storage');
+    } else {
+      console.log('⚠️  Firestore not available, using in-memory storage for development');
+      console.log('   Error:', error.message);
+    }
+    
     return false;
   }
 };
@@ -115,6 +128,12 @@ const startServer = async () => {
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`🚀 Development API server running on http://localhost:${PORT}`);
     console.log(`📝 API endpoints available at http://localhost:${PORT}/api/`);
+    
+    if (global.firestoreAvailable) {
+      console.log('💾 Database: Firestore (with automatic fallback on quota exceeded)');
+    } else {
+      console.log('💾 Database: In-memory storage (development mode)');
+    };
     
     // Display all available network interfaces
     console.log('\n🌐 Network Interfaces:');
@@ -133,7 +152,7 @@ const startServer = async () => {
 };
 
 // Check if Firestore is available (synchronous check for endpoints)
-const isFirestoreAvailable = () => firestoreAvailable;
+const isFirestoreAvailable = () => global.firestoreAvailable;
 
 // Middleware
 app.use(cors());
@@ -412,6 +431,34 @@ const getProjectMessagesRef = (projectId) => db.collection('projects').doc(proje
 const getProjectPresenceRef = (projectId) => db.collection('projects').doc(projectId).collection('presence');
 const getProjectCollaboratorsRef = (projectId) => db.collection('projects').doc(projectId).collection('collaborators');
 const getUserRef = (userId) => db.collection('users').doc(userId);
+
+// OPTIMIZATION: Cached project existence check to reduce Firestore reads
+const checkProjectExists = async (projectId) => {
+  const now = Date.now();
+  const cached = projectCache.get(projectId);
+  
+  // Return cached result if still valid
+  if (cached && (now - cached.timestamp) < PROJECT_CACHE_TTL) {
+    console.log(`  ⚡ Using cached project existence for ${projectId}`);
+    return cached.exists;
+  }
+  
+  // Check Firestore
+  const projectDoc = await getProjectRef(projectId).get();
+  const exists = projectDoc.exists;
+  
+  // Cache the result
+  projectCache.set(projectId, { exists, timestamp: now });
+  console.log(`  💾 Cached project existence for ${projectId}: ${exists}`);
+  
+  return exists;
+};
+
+// OPTIMIZATION: Invalidate project cache when project is created/deleted
+const invalidateProjectCache = (projectId) => {
+  projectCache.delete(projectId);
+  console.log(`  🗑️ Invalidated cache for project ${projectId}`);
+};
 
 // User management functions
 const createOrUpdateUser = async (userData) => {
@@ -820,6 +867,10 @@ app.post('/api/projects', authenticate, async (req, res) => {
       // Save project to Firestore
       await getProjectRef(projectId).set(project);
       
+      // OPTIMIZATION: Cache the new project
+      invalidateProjectCache(projectId);
+      projectCache.set(projectId, { exists: true, timestamp: Date.now() });
+      
       // Create initial project structure in files subcollection
       const filesRef = getProjectFilesRef(projectId);
       
@@ -886,6 +937,10 @@ app.delete('/api/projects/:projectId', async (req, res) => {
       batch.delete(projectRef);
       
       await batch.commit();
+      
+      // OPTIMIZATION: Invalidate cache after deletion
+      invalidateProjectCache(projectId);
+      
       console.log(`✅ Deleted project ${projectId} from Firestore`);
     } else {
       // Mock database fallback
@@ -1053,11 +1108,9 @@ app.put('/api/projects/:projectId/files/*', async (req, res) => {
       try {
         console.log('  Trying Firestore for file update...');
         
-        // First, check if the project exists
-        const projectRef = db.collection('projects').doc(projectId);
-        const projectDoc = await projectRef.get();
-        
-        if (!projectDoc.exists) {
+        // OPTIMIZATION: Use cached project existence check
+        const projectExists = await checkProjectExists(projectId);
+        if (!projectExists) {
           console.log('  ERROR: Project not found in Firestore');
           return res.status(404).json({ error: 'Project not found' });
         }
@@ -1131,11 +1184,9 @@ app.delete('/api/projects/:projectId/files/*', async (req, res) => {
       try {
         console.log('  Trying Firestore for file deletion...');
         
-        // First, check if the project exists
-        const projectRef = db.collection('projects').doc(projectId);
-        const projectDoc = await projectRef.get();
-        
-        if (!projectDoc.exists) {
+        // OPTIMIZATION: Use cached project existence check
+        const projectExists = await checkProjectExists(projectId);
+        if (!projectExists) {
           console.log('  ERROR: Project not found in Firestore');
           return res.status(404).json({ error: 'Project not found' });
         }
@@ -1439,77 +1490,141 @@ app.post('/api/projects/:projectId/invite', authenticate, async (req, res) => {
       return res.status(400).json({ error: 'Role must be either "editor" or "viewer"' });
     }
 
+    let project;
+    let projectName = 'Project';
+
     if (!isFirestoreAvailable()) {
       // Use mock database
       try {
         // Allow all authenticated users to invite collaborators
         const collaboratorData = await mockOperations.addCollaboratorInvitation(projectId, email, role, req.user.id);
-        console.log(`✅ Mock invitation sent to ${email} as ${role}`);
-        return res.json({ 
-          success: true, 
-          message: `Invitation sent to ${email} as ${role}`,
-          collaborator: collaboratorData 
-        });
+        
+        // Get project details for email
+        const foundProject = mockDatabase.projects.find(p => p.id === projectId);
+        if (foundProject) {
+          project = foundProject;
+          projectName = foundProject.name || 'Project';
+        }
+        
+        console.log(`✅ Mock invitation added to database for ${email} as ${role}`);
       } catch (mockError) {
         console.error('Mock database error:', mockError);
         return res.status(404).json({ error: mockError.message });
       }
-    }
+    } else {
+      // Check if project exists and user has permission
+      const projectDoc = await db.collection('projects').doc(projectId).get();
+      if (!projectDoc.exists) {
+        return res.status(404).json({ error: 'Project not found' });
+      }
 
-    // Check if project exists and user has permission
-    const projectDoc = await db.collection('projects').doc(projectId).get();
-    if (!projectDoc.exists) {
-      return res.status(404).json({ error: 'Project not found' });
-    }
-
-    const project = projectDoc.data();
-    
-    // Check if user is the owner
-    const isOwner = (project.owner_id === req.user.id) || (project.created_by === req.user.id);
-    
-    // Check if user is a collaborator with appropriate permissions
-    let userRole = null;
-    const userEmailKey = req.user.email.replace(/\./g, '_').replace(/@/g, '_');
-    
-    // Check for collaborator role using email-based key
-    if (project.collaborators && typeof project.collaborators === 'object') {
-      for (const [key, collaborator] of Object.entries(project.collaborators)) {
-        if (collaborator.email === req.user.email || collaborator.user_id === req.user.id) {
-          userRole = collaborator.role;
-          break;
+      project = projectDoc.data();
+      projectName = project.name || 'Project';
+      
+      // Check if user is the owner
+      const isOwner = (project.owner_id === req.user.id) || (project.created_by === req.user.id);
+      
+      // Check if user is a collaborator with appropriate permissions
+      let userRole = null;
+      const userEmailKey = req.user.email.replace(/\./g, '_').replace(/@/g, '_');
+      
+      // Check for collaborator role using email-based key
+      if (project.collaborators && typeof project.collaborators === 'object') {
+        for (const [key, collaborator] of Object.entries(project.collaborators)) {
+          if (collaborator.email === req.user.email || collaborator.user_id === req.user.id) {
+            userRole = collaborator.role;
+            break;
+          }
         }
       }
+      
+      // Allow all authenticated users to invite collaborators
+      console.log(`🔐 Permission check for user ${req.user.email}: allowing invitation`);
+
+      const emailKey = email.replace('.', '_');
+      
+      // Check if user is already a collaborator
+      if (project.collaborators?.[emailKey]) {
+        return res.status(400).json({ error: 'User is already a collaborator' });
+      }
+
+      // Add collaborator to project
+      const collaboratorData = {
+        email,
+        role,
+        invited_by: req.user.id,
+        invited_at: new Date().toISOString(),
+        status: 'invited'
+      };
+
+      await db.collection('projects').doc(projectId).update({
+        [`collaborators.${emailKey}`]: collaboratorData
+      });
+      
+      console.log(`✅ Firestore invitation added to database for ${email} as ${role}`);
     }
-    
-    // Allow all authenticated users to invite collaborators
-    console.log(`🔐 Permission check for user ${req.user.email}: allowing invitation`);
 
-    const emailKey = email.replace('.', '_');
-    
-    // Check if user is already a collaborator
-    if (project.collaborators?.[emailKey]) {
-      return res.status(400).json({ error: 'User is already a collaborator' });
+    // Send email via EmailJS REST API
+    try {
+      const emailJSConfig = {
+        PUBLIC_KEY: 'a1G5c01uj9gXf8gCh',
+        SERVICE_ID: 'service_a5zyw4z',
+        TEMPLATE_ID: 'template_eex2l6b'
+      };
+
+      const emailData = {
+        service_id: emailJSConfig.SERVICE_ID,
+        template_id: emailJSConfig.TEMPLATE_ID,
+        user_id: emailJSConfig.PUBLIC_KEY,
+        template_params: {
+          to_email: email,
+          from_name: req.user.name || req.user.email.split('@')[0],
+          project_name: projectName,
+          project_id: projectId,
+          role: role,
+          custom_message: `${req.user.name || req.user.email} has invited you to collaborate on "${projectName}" as a ${role}.`,
+          subject: `You've been invited to collaborate on "${projectName}"`
+        }
+      };
+
+      console.log(`📧 Sending email via EmailJS to ${email}...`);
+      
+      const response = await fetch('https://api.emailjs.com/api/v1.0/email/send', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(emailData)
+      });
+
+      if (response.ok) {
+        console.log(`✅ Email sent successfully to ${email} via EmailJS`);
+        res.json({ 
+          success: true, 
+          message: `Invitation sent to ${email} as ${role}`,
+          emailSent: true
+        });
+      } else {
+        const errorText = await response.text();
+        console.error(`⚠️ EmailJS API error:`, response.status, errorText);
+        // Return success since invitation was added to database, but note email failed
+        res.json({ 
+          success: true, 
+          message: `Invitation added to project, but email delivery failed. Please share the project ID directly: ${projectId}`,
+          emailSent: false,
+          emailError: `EmailJS error: ${response.status}`
+        });
+      }
+    } catch (emailError) {
+      console.error('⚠️ Failed to send email via EmailJS:', emailError.message);
+      // Return success since invitation was added to database, but note email failed
+      res.json({ 
+        success: true, 
+        message: `Invitation added to project, but email could not be sent. Please share the project ID directly: ${projectId}`,
+        emailSent: false,
+        emailError: emailError.message
+      });
     }
-
-    // Add collaborator to project
-    const collaboratorData = {
-      email,
-      role,
-      invited_by: req.user.id,
-      invited_at: new Date().toISOString(),
-      status: 'invited'
-    };
-
-    await db.collection('projects').doc(projectId).update({
-      [`collaborators.${emailKey}`]: collaboratorData
-    });
-    
-    console.log(`✅ Firestore invitation sent to ${email} as ${role}`);
-    res.json({ 
-      success: true, 
-      message: `Invitation sent to ${email} as ${role}`,
-      collaborator: collaboratorData 
-    });
   } catch (error) {
     console.error('Error sending invitation:', error);
     res.status(500).json({ error: 'Failed to send invitation' });

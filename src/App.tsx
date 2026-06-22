@@ -10,6 +10,8 @@ import { CodeEditor } from './components/CodeEditor';
 import { ChatPanel } from './components/ChatPanel';
 import { UserPanel } from './components/UserPanel';
 import { Toolbar } from './components/Toolbar';
+import { DatabaseStatus } from './components/DatabaseStatus';
+import { ThrottleStatus } from './components/ThrottleStatus';
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from './components/ui/resizable';
 import { Project, useProject } from './hooks/useProject';
 import { usePresence } from './hooks/usePresence';
@@ -53,6 +55,7 @@ function CodeEditorApp({ project, onBackToLanding }: { project: Project; onBackT
             />
             <UserPanel 
               users={activeUsers} 
+              project={activeProject}
               projectId={activeProject.id}
               projectName={activeProject.name}
               isOwner={activeProject.owner_id === user?.id}
@@ -118,6 +121,10 @@ export default function App() {
                 <ProjectSelector onProjectSelect={setSelectedProject} onBackToLanding={handleBackToLanding} />
               )}
               <Toaster />
+              
+              {/* Database monitoring components */}
+              <DatabaseStatus />
+              <ThrottleStatus />
             </div>
           </ProjectProvider>
         </AuthWrapper>

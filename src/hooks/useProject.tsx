@@ -487,7 +487,7 @@ export function ProjectProvider({ children }: ProjectProviderProps) {
 
     console.log('Setting up file sync polling for project:', currentProject.id);
     
-    // Poll for file changes every 5 seconds
+    // OPTIMIZED: Poll for file changes every 15 seconds (reduced from 5s)
     const filePolling = setInterval(async () => {
       try {
         console.log('Polling for file changes...');
@@ -511,7 +511,7 @@ export function ProjectProvider({ children }: ProjectProviderProps) {
       } catch (error) {
         console.error('Error polling for file changes:', error);
       }
-    }, 5000);
+    }, 10000);
 
     return () => {
       console.log('Cleaning up file sync polling');
@@ -519,12 +519,13 @@ export function ProjectProvider({ children }: ProjectProviderProps) {
     };
   }, [currentProject, files]);
 
-  // Set up polling for project role changes every 10 seconds
+  // Set up polling for project role changes every 30 seconds
   useEffect(() => {
     if (!currentProject) return;
 
     console.log('Setting up project role polling for project:', currentProject.id);
     
+    // OPTIMIZED: Poll for role changes every 30 seconds (reduced from 10s)
     const rolePolling = setInterval(async () => {
       try {
         console.log('Polling for project role changes...');
@@ -543,7 +544,7 @@ export function ProjectProvider({ children }: ProjectProviderProps) {
       } catch (error) {
         console.error('Error polling for project role changes:', error);
       }
-    }, 10000); // Poll every 10 seconds
+    }, 30000); // Poll every 30 seconds
 
     return () => {
       console.log('Cleaning up project role polling');

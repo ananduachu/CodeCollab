@@ -87,13 +87,26 @@ export function usePresence(projectId: string) {
     try {
       setLoading(true);
       const data = await apiCall(`/projects/${projectId}/presence`);
+      const previousUserIds = activeUsers.map(u => u.user_id).sort().join(',');
+      const newUserIds = data.presence.map((u: UserPresence) => u.user_id).sort().join(',');
+      
       setActiveUsers(data.presence);
+      
+      // Detect if users have changed (someone joined or left)
+      if (previousUserIds !== newUserIds && previousUserIds !== '') {
+        console.log('👥 Active users changed:', {
+          previous: previousUserIds,
+          new: newUserIds
+        });
+        // This indicates a potential new collaborator or someone leaving
+        // The consuming component should handle this
+      }
     } catch (error) {
       console.error('Failed to fetch presence:', error);
     } finally {
       setLoading(false);
     }
-  }, [projectId, session]);
+  }, [projectId, session, activeUsers]);
 
   // Set up polling for presence updates (temporary until Firebase real-time is implemented)
   useEffect(() => {
@@ -101,15 +114,15 @@ export function usePresence(projectId: string) {
 
     fetchPresence();
 
-    // Poll for presence updates every 3 seconds
+    // OPTIMIZED: Poll for presence updates every 10 seconds (reduced from 3s to reduce quota usage)
     const presencePolling = setInterval(() => {
       fetchPresence();
-    }, 3000);
+    }, 10000);
 
-    // Send periodic presence updates every 15 seconds
+    // OPTIMIZED: Send periodic presence updates every 60 seconds (increased from 30s to reduce writes)
     const presenceUpdate = setInterval(() => {
       updatePresence(null); // Just update the last_seen timestamp
-    }, 15000);
+    }, 60000);
 
     return () => {
       clearInterval(presencePolling);

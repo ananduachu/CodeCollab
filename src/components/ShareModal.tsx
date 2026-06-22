@@ -24,6 +24,7 @@ interface ShareModalProps {
   isOpen: boolean;
   onClose: () => void;
   project: Project;
+  onInviteSent?: () => void; // Optional callback when invitations are sent
 }
 
 interface EmailRecipient {
@@ -32,7 +33,7 @@ interface EmailRecipient {
   name?: string;
 }
 
-export function ShareModal({ isOpen, onClose, project }: ShareModalProps) {
+export function ShareModal({ isOpen, onClose, project, onInviteSent }: ShareModalProps) {
   const { user } = useAuth();
   const [recipients, setRecipients] = useState<EmailRecipient[]>([]);
   const [emailInput, setEmailInput] = useState('');
@@ -139,6 +140,11 @@ export function ShareModal({ isOpen, onClose, project }: ShareModalProps) {
       
       setSendingStatus('success');
       
+      // Call the callback if provided
+      if (onInviteSent) {
+        onInviteSent();
+      }
+      
       // Reset form after successful send
       setTimeout(() => {
         setRecipients([]);
@@ -169,7 +175,7 @@ export function ShareModal({ isOpen, onClose, project }: ShareModalProps) {
         <DialogHeader>
           <DialogTitle className="flex items-center gap-3">
             <Share2 className="h-5 w-5" />
-            Share Project: {project.name}
+            Invite Collaborators to Project: {project.name}
           </DialogTitle>
           <DialogDescription>
             Invite others to collaborate on your project by sending them an email invitation.

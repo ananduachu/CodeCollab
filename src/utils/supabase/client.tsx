@@ -216,8 +216,9 @@ export const firebaseAuth = {
             lastSignInTime: user.metadata.lastSignInTime
           });
           
-          // Create or update user profile in Firestore
-          await createOrUpdateUserProfile(user);
+          // OPTIMIZATION: Don't update user profile on every auth state change
+          // Only update on explicit sign-in/sign-up actions
+          // This eliminates unnecessary writes on page refresh and token refresh
           
           const idToken = await user.getIdToken();
           console.log('🎯 Firebase ID token obtained - length:', idToken.length);
